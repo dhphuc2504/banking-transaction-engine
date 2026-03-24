@@ -68,6 +68,30 @@ app.post('/register', async (req, res) => {
     }
 });
 
+app.post('/set-passcode', async (req, res) => {
+    const {user_id, passcode} = req.body; 
+    try {
+        if(!user_id || !passcode) return res.status(400).json({ error: 'Please input 4-digit passcode'});
+        if (passcode.toString().length !== 4) {
+            return res.status(400).json({ error: 'Passcode must be exactly 4 digits long.'});
+        }
+        const hash_passcode = await bcrypt.hash(passcode.toString(), 10);
+
+        await pool.query(
+            'UPDATE users SET passcode_hash = $1 WHERE user_id = $2',
+            [hash_passcode, user_id]
+        );
+        return res.status(200).json({
+            message: 'Passcode set successfully'
+        });
+    } catch (error) {
+        console.log(error.message);
+        return res.status(500).json({
+            error: 'Server Error'
+        })
+    }
+});
+
 app.post('/login', async (req, res) => {
     const {identifier, password} = req.body; // require identifier (username or email) and password to login
     try {
@@ -95,7 +119,8 @@ app.post('/login', async (req, res) => {
             message: "Login successful!:",
             user: {
                 username: userResult.rows[0].username,
-                email: userResult.rows[0].email
+                email: userResult.rows[0].email,
+                has_passcode: userResult.rows[0].passcode_hash !== null // It's for the front-end work. If user doesn't have the passcode, we pop up the create ppasscode screen
             }
         })
     } catch (error) {
@@ -105,14 +130,14 @@ app.post('/login', async (req, res) => {
 });
 
 app.post('/transfer', async (req, res) => {
-    const { sender_id, receiver_id, amount } = req.body;
+    const { sender_id, receiver_id, amount, passcode } = req.body;
     
     try {
         // Basic Validation
         if (!sender_id || !receiver_id || !amount) return res.status(400).json({ error: 'Please provide sender_id, receiver_id and amount.' });
         if (sender_id === receiver_id) return res.status(400).json({ error: 'Sender and receiver cannot be the same.' });
         if (amount <= 0) return res.status(400).json({ error: 'Transfer amount must be greater than zero.' });
-
+        if (!passcode) return res.status(400).json({ error: 'Please provide your 4-digit passcode to authorize the transfer.' });
         // Check if the receiver exists
         const receiverResult = await pool.query('SELECT user_id FROM users WHERE user_id = $1', [receiver_id]);
         if (receiverResult.rows.length === 0) return res.status(400).json({ error: 'Receiver not found.' });
@@ -121,7 +146,22 @@ app.post('/transfer', async (req, res) => {
         const senderWalletBalance = await pool.query('SELECT balance FROM wallet WHERE user_id = $1', [sender_id]);
         if (senderWalletBalance.rows.length === 0) return res.status(400).json({ error: 'Sender not found.' });
         if (senderWalletBalance.rows[0].balance < amount) return res.status(400).json({ error: 'Insufficient balance.' });
+        // Check for the passcode
+        const senderUserResult = await pool.query(
+            'SELECT passcode_hash FROM users WHERE user_id = $1',
+            [sender_id]
+        )
+        const passcodeHash = senderUserResult.rows[0].passcode_hash;
+        // If the sender doesn't have the passcode
+        if (!passcodeHash) {
+            return res.status(403).json({ error: 'Please set up a transfer passcode in your account settings first.' });
+        }
+        // Compare what they typed with the hash in the database
+        const isPasscodeValid = await bcrypt.compare(passcode.toString(), passcodeHash);
 
+        if (!isPasscodeValid) {
+            return res.status(401).json({ error: 'Invalid passcode. Transfer blocked.' });
+        }
         // Start transaction
         // Get one connection from the pool
         const client = await pool.connect(); 
@@ -166,6 +206,28 @@ app.post('/transfer', async (req, res) => {
         return res.status(500).json({ error: 'Server Error' });
     }
 });
+
+app.get('/history/:user_id', async(req, res) => {
+    const user_id = req.params.user_id;
+    try {
+        const historyResult = await pool.query(
+            `SELECT transaction_id, sender_wallet_id, receiver_wallet_id, amount, status, created_at
+             FROM transactions
+             WHERE sender_wallet_id = $1 OR receiver_wallet_id = $1
+             ORDER BY created_at DESC
+            `,
+            [user_id]
+        );
+        return res.status(200).json({
+            message: 'Transaction history retrieved successfully',
+            count: historyResult.rowCount,
+            transactions: historyResult.rows
+        })
+    } catch(error) {
+        console.error(error.message);
+        return res.status(500).json({ error: 'Server Error' });
+    }
+})
 // Start the server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
