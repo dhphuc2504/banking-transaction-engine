@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KURO Banking</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <div class="container" id="login-view">
+        <h2>Welcome back</h2>
+        <div id="login-error" class="alert"></div>
+        
+        <div class="form-group">
+            <label>Username or Email</label>
+            <input type="text" id="identifier" placeholder="danny@example.com">
+        </div>
+        <div class="form-group">
+            <label>Password</label>
+            <input type="password" id="password" placeholder="••••••••">
+        </div>
+        
+        <button id="login-btn">Log In</button>
+    </div>
+
+    <div class="container hidden" id="dashboard-view">
+        <h2>Transfer Funds</h2>
+        <div id="transfer-message" class="alert" style="color: #3b82f6;"></div>
+        
+        <div class="form-group">
+            <label>Receiver Email</label>
+            <input type="email" id="receiver-email" placeholder="cloud@avalanche.com">
+        </div>
+        <div class="form-group">
+            <label>Amount (VND)</label>
+            <input type="number" id="amount" placeholder="100">
+        </div>
+        <div class="form-group">
+            <label>4-Digit Passcode</label>
+            <input type="password" id="transfer-passcode" placeholder="••••">
+        </div>
+        
+        <button id="transfer-btn">Send Money</button>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>

@@ -1,11 +1,14 @@
 require('dotenv').config();
 const express = require('express');
 const bcrypt = require('bcrypt');
+const cors = require('cors'); 
+const path = require('path');
 const { Pool } = require('pg');
 
 const app = express();
+app.use(cors());
 app.use(express.json()); // Allows the API to read JSON bodies in POST requests
-
+app.use(express.static(path.join(__dirname, 'public')));
 // Set up the PostgreSQL connection pool
 const pool = new Pool({
     user: process.env.DB_USER,
@@ -119,6 +122,7 @@ app.post('/login', async (req, res) => {
             message: "Login successful!:",
             user: {
                 username: userResult.rows[0].username,
+                user_id: userResult.rows[0].user_id,
                 email: userResult.rows[0].email,
                 has_passcode: userResult.rows[0].passcode_hash !== null // It's for the front-end work. If user doesn't have the passcode, we pop up the create ppasscode screen
             }
@@ -130,14 +134,26 @@ app.post('/login', async (req, res) => {
 });
 
 app.post('/transfer', async (req, res) => {
-    const { sender_id, receiver_id, amount, passcode } = req.body;
+    const { sender_id, receiver_email, amount, passcode } = req.body;
     
     try {
-        // Basic Validation
-        if (!sender_id || !receiver_id || !amount) return res.status(400).json({ error: 'Please provide sender_id, receiver_id and amount.' });
-        if (sender_id === receiver_id) return res.status(400).json({ error: 'Sender and receiver cannot be the same.' });
+        if (!sender_id || !receiver_email || !amount) return res.status(400).json({ error: 'Please provide receiver email and amount.' });
         if (amount <= 0) return res.status(400).json({ error: 'Transfer amount must be greater than zero.' });
         if (!passcode) return res.status(400).json({ error: 'Please provide your 4-digit passcode to authorize the transfer.' });
+        const receiverIDResult = await pool.query(
+            'SELECT user_id FROM users WHERE email = $1',
+            [receiver_email]
+        );
+
+        // If the array is empty, that email isn't registered!
+        if (receiverIDResult.rows.length === 0) {
+            return res.status(400).json({ error: 'No user found with that email address.' });
+        }
+
+        // Grab the ID behind the scenes, and continue the transaction exactly as before!
+        const receiver_id = receiverIDResult.rows[0].user_id;
+        // Basic Validation
+        if (sender_id === receiver_id) return res.status(400).json({ error: 'Sender and receiver cannot be the same.' });
         // Check if the receiver exists
         const receiverResult = await pool.query('SELECT user_id FROM users WHERE user_id = $1', [receiver_id]);
         if (receiverResult.rows.length === 0) return res.status(400).json({ error: 'Receiver not found.' });
@@ -198,7 +214,7 @@ app.post('/transfer', async (req, res) => {
             return res.status(500).json({ error: 'Transfer failed. Please try again.' });
             
         } finally {
-            client.release(); // Give the connection back to the pool so other users can use it!
+            client.release(); // Give the connection back to the pool so other users can use it
         }
 
     } catch (error) {
@@ -228,7 +244,7 @@ app.get('/history/:user_id', async(req, res) => {
         return res.status(500).json({ error: 'Server Error' });
     }
 })
-// Start the server
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`Server is running on http://localhost:${PORT}`);
