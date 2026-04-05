@@ -124,7 +124,7 @@ app.post('/login', async (req, res) => {
                 username: userResult.rows[0].username,
                 user_id: userResult.rows[0].user_id,
                 email: userResult.rows[0].email,
-                has_passcode: userResult.rows[0].passcode_hash !== null // It's for the front-end work. If user doesn't have the passcode, we pop up the create ppasscode screen
+                has_passcode: userResult.rows[0].passcode_hash !== null // It's for the front-end work. If user doesn't have the passcode, we pop up the create passcode screen
             }
         })
     } catch (error) {
@@ -134,87 +134,101 @@ app.post('/login', async (req, res) => {
 });
 
 app.post('/transfer', async (req, res) => {
-    const { sender_id, receiver_email, amount, passcode } = req.body;
+    const { sender_id, sender_bank_number, receiver_bank_number, amount, passcode } = req.body;
     
     try {
-        if (!sender_id || !receiver_email || !amount) return res.status(400).json({ error: 'Please provide receiver email and amount.' });
+        // 1. Basic Input Validation
+        if (!sender_bank_number || !receiver_bank_number || !amount) return res.status(400).json({ error: 'Please provide both bank numbers and amount.' });
         if (amount <= 0) return res.status(400).json({ error: 'Transfer amount must be greater than zero.' });
-        if (!passcode) return res.status(400).json({ error: 'Please provide your 4-digit passcode to authorize the transfer.' });
-        const receiverIDResult = await pool.query(
-            'SELECT user_id FROM users WHERE email = $1',
-            [receiver_email]
-        );
+        if (!passcode) return res.status(400).json({ error: 'Please provide your 4-digit passcode.' });
+        if (sender_bank_number === receiver_bank_number) return res.status(400).json({ error: 'Sender and receiver cannot be the same.' });
 
-        // If the array is empty, that email isn't registered!
-        if (receiverIDResult.rows.length === 0) {
-            return res.status(400).json({ error: 'No user found with that email address.' });
+        // 2. Fetch ALL sender info in one trip (wallet_id, balance, and owner)
+        const senderWalletResult = await pool.query(
+            'SELECT wallet_id, balance, user_id FROM wallet WHERE bank_number = $1',
+            [sender_bank_number]
+        );
+        
+        // Prevent crash if wallet doesn't exist
+        if (senderWalletResult.rows.length === 0) {
+            return res.status(400).json({ error: 'Sender wallet not found.' });
         }
 
-        // Grab the ID behind the scenes, and continue the transaction exactly as before!
-        const receiver_id = receiverIDResult.rows[0].user_id;
-        // Basic Validation
-        if (sender_id === receiver_id) return res.status(400).json({ error: 'Sender and receiver cannot be the same.' });
-        // Check if the receiver exists
-        const receiverResult = await pool.query('SELECT user_id FROM users WHERE user_id = $1', [receiver_id]);
-        if (receiverResult.rows.length === 0) return res.status(400).json({ error: 'Receiver not found.' });
+        const senderWallet = senderWalletResult.rows[0];
 
-        // Check if sender exists and has funds
-        const senderWalletBalance = await pool.query('SELECT balance FROM wallet WHERE user_id = $1', [sender_id]);
-        if (senderWalletBalance.rows.length === 0) return res.status(400).json({ error: 'Sender not found.' });
-        if (senderWalletBalance.rows[0].balance < amount) return res.status(400).json({ error: 'Insufficient balance.' });
-        // Check for the passcode
+        // 3. SECURITY CHECK: Does the person logged in actually own this wallet?
+        if (senderWallet.user_id !== sender_id) {
+            return res.status(403).json({ error: 'Unauthorized: You do not own this wallet.' });
+        }
+
+        // 4. Validate Balance
+        if (senderWallet.balance < amount) {
+            return res.status(400).json({ error: 'Insufficient balance.' });
+        }
+
+        // 5. Fetch receiver info
+        const receiverWalletResult = await pool.query(
+            'SELECT wallet_id FROM wallet WHERE bank_number = $1',
+            [receiver_bank_number]
+        );
+        
+        if (receiverWalletResult.rows.length === 0) {
+            return res.status(400).json({ error: 'Receiver bank number not found.' });
+        }
+
+        const receiverWalletID = receiverWalletResult.rows[0].wallet_id;
+        const senderWalletID = senderWallet.wallet_id;
+
+        // 6. Check for the passcode
         const senderUserResult = await pool.query(
             'SELECT passcode_hash FROM users WHERE user_id = $1',
             [sender_id]
-        )
+        );
         const passcodeHash = senderUserResult.rows[0].passcode_hash;
-        // If the sender doesn't have the passcode
+        
         if (!passcodeHash) {
-            return res.status(403).json({ error: 'Please set up a transfer passcode in your account settings first.' });
+            return res.status(403).json({ error: 'Please set up a transfer passcode first.' });
         }
-        // Compare what they typed with the hash in the database
+        
         const isPasscodeValid = await bcrypt.compare(passcode.toString(), passcodeHash);
-
         if (!isPasscodeValid) {
             return res.status(401).json({ error: 'Invalid passcode. Transfer blocked.' });
         }
-        // Start transaction
-        // Get one connection from the pool
+
+        // 7. Start the ACID Transaction
         const client = await pool.connect(); 
 
         try {
             await client.query('BEGIN');
 
             await client.query(
-                'UPDATE wallet SET balance = balance - $1 WHERE user_id = $2',
-                [amount, sender_id]
+                'UPDATE wallet SET balance = balance - $1 WHERE bank_number = $2',
+                [amount, sender_bank_number]
             );
             await client.query(
-                'UPDATE wallet SET balance = balance + $1 WHERE user_id = $2',
-                [amount, receiver_id]
+                'UPDATE wallet SET balance = balance + $1 WHERE bank_number = $2',
+                [amount, receiver_bank_number]
             );
             await client.query(
                 'INSERT INTO transactions (sender_wallet_id, receiver_wallet_id, amount, status, created_at) VALUES ($1, $2, $3, $4, NOW())',
-                [sender_id, receiver_id, amount, 'SUCCESS'] // Assuming sender_id = wallet_id 
+                [senderWalletID, receiverWalletID, amount, 'SUCCESS']
             );
 
             await client.query('COMMIT');
             return res.status(200).json({ message: 'Transfer successful!' });
 
         } catch (error) {
-            // Undo if the server crashes
             await client.query('ROLLBACK');
             console.error("Transaction failed, rolling back:", error.message);
             
-            // Log the failure safely outside the rolled-back transaction
             await pool.query(
                 'INSERT INTO transactions (sender_wallet_id, receiver_wallet_id, amount, status, created_at) VALUES ($1, $2, $3, $4, NOW())',
-                [sender_id, receiver_id, amount, 'FAILED']
+                [senderWalletID, receiverWalletID, amount, 'FAILED']
             );
             return res.status(500).json({ error: 'Transfer failed. Please try again.' });
             
         } finally {
-            client.release(); // Give the connection back to the pool so other users can use it
+            client.release();
         }
 
     } catch (error) {
@@ -229,7 +243,8 @@ app.get('/history/:user_id', async(req, res) => {
         const historyResult = await pool.query(
             `SELECT transaction_id, sender_wallet_id, receiver_wallet_id, amount, status, created_at
              FROM transactions
-             WHERE sender_wallet_id = $1 OR receiver_wallet_id = $1
+             WHERE sender_wallet_id IN (SELECT wallet_id FROM wallet WHERE user_id = $1)
+                OR receiver_wallet_id IN (SELECT wallet_id FROM wallet WHERE user_id = $1)
              ORDER BY created_at DESC
             `,
             [user_id]
